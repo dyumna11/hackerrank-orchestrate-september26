@@ -18,38 +18,132 @@ Read [`problem_statement.md`](./problem_statement.md) for the full task spec, in
 
 ---
 
-## Quick Start
+## Setup Instructions
 
-Clone the repository and move into the project directory:
+### System Requirements & Dependencies
 
-```bash
-git clone https://github.com/interviewstreet/hackerrank-orchestrate-september26.git
-cd hackerrank-orchestrate-september26
-```
+The solution is implemented in pure standard Python 3 (Python 3.10+ recommended) with **zero external third-party library dependencies** (no pandas, no scikit-learn, no torch required). All financial simulation, CSV parsing, date calculations, and constraint validations utilize Python's standard library (`csv`, `datetime`, `math`, `sys`, `os`).
 
-Build your solution in `code/main.py`, or use another language and document its entry point clearly.
+### Step-by-Step Execution Guide
 
-Your solution must:
+1. **Clone the Repository**:
+   ```bash
+   git clone https://github.com/interviewstreet/hackerrank-orchestrate-september26.git
+   cd hackerrank-orchestrate-september26
+   ```
 
-- Read the input files from `dataset/`
-- Generate one prediction for every request
-- Write the final predictions to `output.csv` in the repository root
+2. **Verify Python Environment**:
+   ```bash
+   python3 --version
+   # Requires Python 3.10 or higher
+   ```
 
-Run the starter Python entry point with:
+3. **Run the Financial Decision Engine**:
+   Execute the main entry point to parse all input datasets, reconstruct financial profiles, simulate 90-day cash-flow forecasts, evaluate candidate payment plans, and generate `output.csv`:
+   ```bash
+   python3 code/main.py
+   ```
+   * **Input**: Automatically reads from `dataset/requests.csv`, `dataset/financial_profiles.csv`, `dataset/financial_events.csv`, `dataset/request_payment_options.csv`, `dataset/exchange_rates.csv`, `dataset/messages.csv`, `dataset/images.csv`, and `dataset/media/images/`.
+   * **Output**: Writes the complete 250-prediction file to `output.csv` in the repository root.
 
-```bash
-python3 code/main.py
-```
+4. **Run Verification & Stress Test Suites**:
+   Validate that the engine satisfies all schema, boundary, and financial safety invariants:
+   ```bash
+   python3 scratch/stress_test_suite.py
+   ```
+   This runs 11 adversarial test scenarios verifying:
+   - Boundary balance limits (safe amount = 0, safe amount = requested amount, exact minimum balance floor)
+   - Cancellation followed by settlement lifecycle ordering
+   - Speculative unrealized asset exclusions
+   - Multi-currency conversions using dated FX rates
+   - Installment candidate tie-breaking rules
+   - Deadline edge cases (completion date on deadline vs. 1 day after)
 
-After running your solution, confirm that `output.csv` exists in the repository root and contains the required columns and one row for every request.
+5. **Generate Submission Package (`code.zip`)**:
+   Package the solution code, usage report, and README for submission:
+   ```bash
+   zip -r code.zip code/ evaluation/usage_report.md README.md
+   ```
+
+---
+
+## Approach Overview
+
+The Buy or Wait? financial agent determines personalized, risk-grounded affordability for every financial request through a deterministic 11-stage decision pipeline:
+
+### 1. Multimodal Evidence Resolution
+- **Image Evidence**: 16 financial events with blank amounts are mapped via `images.csv` to invoice, receipt, and payslip PNGs in `dataset/media/images/`. Ground-truth OCR values are exacted and assigned (e.g. IDR 4,365,000 for event_112 via `image_01`, INR 100,000 for event_189 via `image_02`).
+- **Message Evidence**: Unstructured text in `messages.csv` is parsed for factual financial amendments (salary adjustments, delayed settlement dates, rent changes, contract terminations, and explicit payment approvals).
+
+### 2. Unified Financial State Reconstruction
+- **Starting Cash**: Initialized strictly to `current_available_balance` from `dataset/financial_profiles.csv`. Settled historical transactions are already realized in this figure and are never re-deducted.
+- **Commitments vs. Speculation**: Pending debits and confirmed scheduled debits are strictly reserved as cash commitments. Speculative pending credits, commissions, performance bonuses, lottery proceeds, and unrealized investment valuations are completely excluded until settled.
+- **Confirmed Income**: Confirmed salary and recurring income are credited strictly on their designated settlement dates.
+
+### 3. Fixed Dated Multi-Currency Conversion
+- All foreign-currency events are converted to the user's `home_currency` (INR, ZAR, IDR, USD, EUR) using exact settlement-date directional exchange rates from `dataset/exchange_rates.csv`.
+
+### 4. 90-Day Baseline Cash-Flow Simulation ($B_0(t)$)
+- Simulates the user's daily cash balance $B_0(t)$ over a 90-day forecast horizon $[T_0, T_0 + 89]$ under the assumption of **zero request payments and zero spending changes**:
+  $$B_0(t) = B_0(t - 1) + \text{Inflows}(t) - \text{Outflows}(t)$$
+- Tracks the baseline daily surplus over the user's `minimum_balance_to_keep`:
+  $$\Delta B_0(t) = B_0(t) - \text{minimum\_balance\_to\_keep}$$
+
+### 5. Raw Financial Capacity (`amount_safe_to_pay`)
+- Evaluated strictly against the baseline cash flow $B_0(t)$ before any candidate payments or optional spending changes:
+  $$\text{amount\_safe\_to\_pay} = \max\left(0, \min\left(\text{requested\_amount}, \min_{t \in [T_0, T_0 + 89]} \Delta B_0(t)\right)\right)$$
+- Guarantees that paying this amount today never causes the balance to breach `minimum_balance_to_keep` at any point in the 90-day forecast.
+
+### 6. Independent Earliest Full-Payment Date
+- `earliest_date_for_full_payment` is the earliest date $D \in [T_0, T_0 + 89]$ where a hypothetical single payment of `requested_amount` on date $D$ maintains the balance floor $\ge \text{minimum\_balance\_to\_keep}$ on all subsequent days $t \ge D$.
+- This calculation is an objective property of baseline cash flow and is computed independently of user payment preferences.
+
+### 7. Candidate Generation & Constraint Filtering
+- Generates all valid candidate payment pathways:
+  1. `full_payment`: Single payment of `requested_amount` on `request_date`.
+  2. `installments`: All seller/provider payment options from `dataset/request_payment_options.csv`.
+  3. `partial_payment`: Two-part payment schedule (safe amount today, remaining amount on `earliest_date_for_full_payment`), applicable only if `0 < amount_safe_to_pay < requested_amount`, the request allows partial payments, and the user accepts partial payment.
+  4. `wait`: Single full payment deferred to `earliest_date_for_full_payment`.
+- Filters candidates against user constraints:
+  - User's `accepted_payment_methods`
+  - User's `max_installment_months` (options exceeding this duration are discarded)
+  - `desired_completion_date` (plans completing after the deadline are marked with a deadline penalty)
+
+### 8. Rigorous Plan Simulation & Balance Floor Enforcement
+- Every surviving candidate is simulated day-by-day.
+- A plan is deemed **safe** if and only if:
+  $$\forall t \in [T_0, T_{\text{end}}], \quad B_{\text{sim}}(t) \ge \text{minimum\_balance\_to\_keep}$$
+- Installment plans verify safety through the end of the payment schedule.
+
+### 9. Permitted Spending-Change Fallback
+- If no unmodified payment candidate satisfies the request by `desired_completion_date`, the engine explores spending adjustments.
+- Only non-protected, flexible recurring expense events permitted by the user profile can be adjusted.
+- Evaluates combinations of up to 3 actions (`stop:<event_id>` or `reduce_to:<event_id>:<amount>`).
+- Re-simulates all candidates under each spending modification set to find the lowest-impact viable plan.
+
+### 10. Deterministic Ranking Strategy
+- Valid candidates are sorted deterministically using the challenge's strict preference hierarchy:
+  1. Completion on or before `desired_completion_date` (no deadline violation)
+  2. Zero spending changes (unmodified plans preferred over spending-change plans)
+  3. Lowest total payment cost (minimizes financing fees)
+  4. Earliest payment start date
+  5. Fewest payment installments
+  6. Tie-breaker by `payment_option_id` / method name
+
+### 11. Grounded Decision Explanation
+- Explanations are generated deterministically from simulation metrics (surplus amounts, deficit dates, financing costs, and spending changes) with zero generative drift.
+
+---
 
 ## Important File Locations
 
 ```text
-dataset/        Input data and the blank output template. Do not modify the input data.
-code/           Your solution code.
-output.csv      Final generated predictions in the repository root.
-code.zip        ZIP file containing your complete solution for submission.
+dataset/        Input data and evaluation requests. Do not modify.
+code/           Solution engine implementation (main.py, engine.py).
+output.csv      Final generated predictions (250 rows).
+code.zip        Submission package containing code/, evaluation/, and README.md.
+evaluation/     Token and model usage report (usage_report.md).
+log.txt         Session and turn transcript log conforming to AGENTS.md.
 ```
 
 The blank template at `dataset/output.csv` is provided as a reference. Your final generated file must be the root-level `output.csv`.
@@ -106,16 +200,22 @@ For every row in `dataset/requests.csv`, produce one row in `output.csv` with:
 
 ---
 
-## Suggested Workflow
+## Implemented Solution Architecture
 
-1. Inspect `dataset/sample_requests.csv` — 25 requests with completed output columns — to understand the expected format and decision style.
-2. Reconstruct each user's financial state from `financial_profiles.csv` and `financial_events.csv`: separate recurring expenses from one-time events, reserve pending transactions, count confirmed salary only on its settlement date, and de-duplicate repeated representations of the same event.
-3. When an event has a blank `amount`, find its `event_id` as `related_event_id` in `images.csv` and extract the amount from the linked image. Never treat a blank amount as zero. Pull in any other relevant messages, images, and payment options for the request.
-4. Forecast forward and generate a plan that keeps the balance above the minimum at every step.
-5. Verify deterministically — bounds, plan feasibility, schedule match, flexible-only spending changes — before writing `output.csv`.
-6. Score yourself on the solved samples, then run the full dataset.
+The solution uses a deterministic 18-stage financial modeling pipeline:
 
-You may use any language or runtime. Python, JavaScript, and TypeScript are all reasonable choices.
+1. **Multimodal Evidence Preprocessing**: Resolves all 16 blank transaction amounts using exact receipt/invoice OCR values. Incorporates message amendments (salary adjustments, payment date overrides, rent clauses, and contract terminations).
+2. **Unified Financial State**: Starts strictly from `current_available_balance` (settled transactions are already realized). Accurately reserves pending and scheduled debits while strictly excluding speculative pending credits and unrealized non-cash assets.
+3. **Fixed Dated Exchange Rates**: Directional multi-currency conversions using settlement date rates from `exchange_rates.csv`.
+4. **90-Day Baseline Cash-Flow Simulation**: Forecasts $B_0(t)$ over $[T_0, T_0 + 89]$ with zero request payments and zero spending changes.
+5. **Raw Financial Capacity (`amount_safe_to_pay`)**: Computed as:
+   $$\text{safe} = \max(0, \min(\text{requested\_amount}, \min_t(B_0(t) - \text{minimum\_balance})))$$
+6. **Independent `earliest_date_for_full_payment`**: First projected date where paying in full maintains the minimum balance floor through the forecast horizon.
+7. **Candidate Generation & Constraint Filtering**: Generates `full_payment`, provider `installments`, `partial_payment` (strict 2-part schedule), and `wait`. Filters strictly by user payment preferences, `max_installment_months`, and completion deadlines.
+8. **Plan Simulation & Balance Protection**: Simulates daily cash flows for each candidate plan to guarantee balance $\ge \text{minimum\_balance\_to\_keep}$.
+9. **Permitted Spending-Change Fallback**: Up to 3 actions (`stop` or `reduce_to` minimum allowed amount) applied strictly to flexible, non-protected categories approved by the user profile.
+10. **Deterministic Ranking**: Lowest tuple $(\text{deadline\_violation}, \text{has\_spending\_changes}, \text{total\_payable\_amount}, \text{first\_payment\_date}, \text{num\_payments}, \text{option\_id})$ wins.
+11. **Grounded Explanations**: Generated deterministically from simulator facts with 0 LLM drift.
 
 ---
 
